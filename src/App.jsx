@@ -19,23 +19,18 @@ function loadBets() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : DEFAULT_BETS;
-  } catch {
-    return DEFAULT_BETS;
-  }
+  } catch { return DEFAULT_BETS; }
 }
-
 function saveBets(bets) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(bets)); } catch (_) {}
 }
 
-// Build ESPN scoreboard URL for today's date
 function getScoreboardUrl() {
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
-  const dateStr = `${y}${m}${d}`;
-  return `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&limit=100`;
+  return `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${y}${m}${d}&limit=100`;
 }
 
 function calcWin(odds, stake) {
@@ -49,9 +44,9 @@ function fmtTime(isoStr) {
   catch { return ""; }
 }
 
-// Extract full team name phrases from a pick string.
-// Splits on "/" for totals, strips spread/ML/total descriptors.
-// Returns full phrases e.g. ["north dakota state"] not ["north","dakota","state"]
+// ── Team phrase extraction ─────────────────────────────────────────────────
+// Splits pick on "/" for totals, strips bet descriptors & numbers,
+// returns full phrases like ["north dakota state"] not ["north","dakota","state"]
 function extractTeamPhrases(pick) {
   return pick.split("/").map(p =>
     p
@@ -63,14 +58,12 @@ function extractTeamPhrases(pick) {
   ).filter(p => p.replace(/\s/g, "").length >= 3);
 }
 
+// ── Match ESPN game to bet ─────────────────────────────────────────────────
 function gameMatchesBets(event, bets) {
   const comps = event.competitions?.[0]?.competitors || [];
   const espnNames = comps.flatMap(c => [
-    c.team?.name,
-    c.team?.shortDisplayName,
-    c.team?.abbreviation,
-    c.team?.displayName,
-    c.team?.nickname,
+    c.team?.name, c.team?.shortDisplayName,
+    c.team?.abbreviation, c.team?.displayName, c.team?.nickname,
   ]).filter(Boolean).map(n => n.toLowerCase().trim());
 
   return bets.some(bet => {
@@ -82,7 +75,118 @@ function gameMatchesBets(event, bets) {
   });
 }
 
-// ─── CSS ───────────────────────────────────────────────────────────────────
+// ── Get bets that match a specific game ───────────────────────────────────
+function getBetsForGame(event, bets) {
+  const comps = event.competitions?.[0]?.competitors || [];
+  const espnNames = comps.flatMap(c => [
+    c.team?.name, c.team?.shortDisplayName,
+    c.team?.abbreviation, c.team?.displayName, c.team?.nickname,
+  ]).filter(Boolean).map(n => n.toLowerCase().trim());
+
+  return bets.filter(bet => {
+    const phrases = extractTeamPhrases(bet.pick);
+    return phrases.some(phrase =>
+      phrase.length >= 4 &&
+      espnNames.some(name => name.includes(phrase) || phrase.includes(name))
+    );
+  });
+}
+
+// ── Human-readable bet label for score card ───────────────────────────────
+function betLabel(bet) {
+  const p = bet.pick;
+  if (bet.betType === "Total") {
+    const m = p.match(/\b(over|under)\s*([\d.]+)/i);
+    if (m) return `Betting ${m[1].toUpperCase()} ${m[2]}`;
+    return p;
+  }
+  if (bet.betType === "Moneyline") {
+    const phrases = extractTeamPhrases(p);
+    const team = phrases[0] ? phrases[0].split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") : p;
+    return `${team} ML ${fmtOdds(bet.odds)}`;
+  }
+  if (bet.betType === "Spread") {
+    const m = p.match(/([+-][\d.]+)/);
+    const phrases = extractTeamPhrases(p);
+    const team = phrases[0] ? phrases[0].split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") : p;
+    return `${team} ${m ? m[1] : ""}`;
+  }
+  return p;
+}
+
+// ── Auto-grade a single bet from a final game ─────────────────────────────
+function gradeBet(bet, event) {
+  if (event.status?.type?.state !== "post") return null; // only grade finished games
+  if (bet.status !== "pending") return null;              // don't overwrite manual grades
+
+  const comps = event.competitions?.[0]?.competitors || [];
+  const home  = comps.find(c => c.homeAway === "home");
+  const away  = comps.find(c => c.homeAway === "away");
+  if (!home || !away) return null;
+
+  const hScore = parseInt(home.score ?? 0);
+  const aScore = parseInt(away.score ?? 0);
+  const combined = hScore + aScore;
+
+  const homeNames = [home.team?.name, home.team?.shortDisplayName, home.team?.abbreviation]
+    .filter(Boolean).map(n => n.toLowerCase());
+  const awayNames = [away.team?.name, away.team?.shortDisplayName, away.team?.abbreviation]
+    .filter(Boolean).map(n => n.toLowerCase());
+
+  // ── TOTAL ──
+  if (bet.betType === "Total") {
+    const m = bet.pick.match(/\b(over|under)\s*([\d.]+)/i);
+    if (!m) return null;
+    const isOver = m[1].toLowerCase() === "over";
+    const line   = parseFloat(m[2]);
+    if (combined === line) return "push";
+    return (isOver ? combined > line : combined < line) ? "won" : "lost";
+  }
+
+  // ── SPREAD ──
+  if (bet.betType === "Spread") {
+    const spreadM = bet.pick.match(/([+-][\d.]+)/);
+    if (!spreadM) return null;
+    const spread   = parseFloat(spreadM[1]);
+    const phrases  = extractTeamPhrases(bet.pick);
+    const phrase   = phrases[0];
+    if (!phrase || phrase.length < 4) return null;
+
+    let betScore, oppScore;
+    if (homeNames.some(n => n.includes(phrase) || phrase.includes(n))) {
+      betScore = hScore; oppScore = aScore;
+    } else if (awayNames.some(n => n.includes(phrase) || phrase.includes(n))) {
+      betScore = aScore; oppScore = hScore;
+    } else return null;
+
+    const margin = betScore + spread - oppScore;
+    if (margin === 0) return "push";
+    return margin > 0 ? "won" : "lost";
+  }
+
+  // ── MONEYLINE ──
+  if (bet.betType === "Moneyline") {
+    const phrases = extractTeamPhrases(bet.pick);
+    const phrase  = phrases[0];
+    if (!phrase || phrase.length < 4) return null;
+
+    if (homeNames.some(n => n.includes(phrase) || phrase.includes(n))) {
+      if (hScore === aScore) return "push";
+      return hScore > aScore ? "won" : "lost";
+    }
+    if (awayNames.some(n => n.includes(phrase) || phrase.includes(n))) {
+      if (hScore === aScore) return "push";
+      return aScore > hScore ? "won" : "lost";
+    }
+    return null;
+  }
+
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CSS
+// ═══════════════════════════════════════════════════════════════════════════
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Barlow+Condensed:wght@400;600;700&display=swap');
 
@@ -109,6 +213,7 @@ const CSS = `
   --focus:       #ffd700;
   --focus-glow:  rgba(255,215,0,0.2);
   --focus-bg:    rgba(255,215,0,0.07);
+  --auto-graded: rgba(100,200,255,0.08);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -133,22 +238,22 @@ const CSS = `
 .hdr-glow {
   position: absolute; inset: 0; pointer-events: none;
   background:
-    radial-gradient(ellipse 70% 90% at 50% 130%, rgba(26,79,168,.55) 0%, transparent 70%),
-    radial-gradient(ellipse 50% 30% at 15% 60%, rgba(91,141,239,.1) 0%, transparent 60%),
-    radial-gradient(ellipse 50% 30% at 85% 60%, rgba(91,141,239,.1) 0%, transparent 60%);
+    radial-gradient(ellipse 70% 90% at 50% 130%, rgba(26,79,168,.5) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 30% at 15% 60%, rgba(91,141,239,.08) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 30% at 85% 60%, rgba(91,141,239,.08) 0%, transparent 60%);
 }
 .hdr-dots {
   position: absolute; top: 0; left: 0; right: 0;
   display: flex; justify-content: space-between;
   padding: 9px 16px;
-  font-size: 8px; color: rgba(91,141,239,.28); letter-spacing: 9px;
+  font-size: 8px; color: rgba(91,141,239,.25); letter-spacing: 9px;
   font-family: 'DM Mono', monospace;
 }
-.crown { font-size: 28px; line-height: 1; margin-bottom: 5px; filter: drop-shadow(0 0 14px rgba(91,141,239,.7)); }
+.crown { font-size: 28px; line-height: 1; margin-bottom: 5px; filter: drop-shadow(0 0 14px rgba(91,141,239,.6)); }
 .title {
   font-family: 'Bebas Neue', sans-serif; font-size: 54px; letter-spacing: 6px;
   color: var(--white); line-height: 1;
-  text-shadow: 0 0 40px rgba(91,141,239,.4), 0 2px 0 rgba(0,0,0,.6);
+  text-shadow: 0 0 40px rgba(91,141,239,.35), 0 2px 0 rgba(0,0,0,.6);
 }
 .title-badge { display: inline-block; margin-top: 6px; font-family: 'DM Mono', monospace; font-size: 8px; letter-spacing: 5px; color: var(--accent); text-transform: uppercase; }
 .title-sub { font-family: 'DM Mono', monospace; font-size: 8px; letter-spacing: 3px; color: var(--dim); margin-top: 3px; text-transform: uppercase; }
@@ -170,12 +275,11 @@ const CSS = `
 .rbar {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 12px; padding: 8px 12px;
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 7px;
-  gap: 8px;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 7px; gap: 8px;
 }
 .rbar-left { display: flex; flex-direction: column; gap: 2px; }
 .rbar-info { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dim); letter-spacing: 1px; }
-.rbar-url  { font-family: 'DM Mono', monospace; font-size: 8px; color: var(--dimmer); letter-spacing: .5px; opacity: .6; word-break: break-all; }
+.rbar-url  { font-family: 'DM Mono', monospace; font-size: 8px; color: var(--dimmer); letter-spacing: .5px; opacity: .7; word-break: break-all; }
 .rbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .rbar-cd   { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--accent); letter-spacing: 1px; white-space: nowrap; }
 .rbar-btn  {
@@ -185,27 +289,35 @@ const CSS = `
 }
 .rbar-btn:hover { background: var(--blue); color: var(--white); }
 
+/* ── AUTO-GRADE BANNER ── */
+.auto-banner {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 12px; padding: 8px 14px;
+  background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.3); border-radius: 7px;
+  font-family: 'DM Mono', monospace; font-size: 10px; color: #2ecc71; letter-spacing: 1px;
+}
+
 /* ── FOCUS LEGEND ── */
 .focus-legend {
   display: flex; align-items: center; gap: 8px;
   margin-bottom: 12px; padding: 7px 12px;
-  background: var(--focus-bg); border: 1px solid rgba(255,215,0,.25); border-radius: 7px;
+  background: var(--focus-bg); border: 1px solid rgba(255,215,0,.22); border-radius: 7px;
 }
 .focus-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--focus); flex-shrink: 0; box-shadow: 0 0 6px var(--focus); }
-.focus-txt { font-family: 'DM Mono', monospace; font-size: 9px; color: rgba(255,215,0,.75); letter-spacing: 1.5px; text-transform: uppercase; }
+.focus-txt { font-family: 'DM Mono', monospace; font-size: 9px; color: rgba(255,215,0,.8); letter-spacing: 1.5px; text-transform: uppercase; }
 
 /* ── API ERROR ── */
 .api-warn {
   margin-bottom: 12px; padding: 10px 14px;
-  background: rgba(255,61,87,.07); border: 1px solid rgba(255,61,87,.3); border-radius: 7px;
-  font-family: 'DM Mono', monospace; font-size: 10px; color: rgba(255,61,87,.8); letter-spacing: .5px; line-height: 1.5;
+  background: rgba(231,76,60,.07); border: 1px solid rgba(231,76,60,.3); border-radius: 7px;
+  font-family: 'DM Mono', monospace; font-size: 10px; color: rgba(231,76,60,.9); letter-spacing: .5px; line-height: 1.5;
 }
 
 /* ── SECTION LABELS ── */
 .sec-lbl {
   font-family: 'DM Mono', monospace; font-size: 8px; color: var(--accent);
   letter-spacing: 4px; text-transform: uppercase;
-  margin: 16px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+  margin: 16px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border2);
 }
 
 /* ── SCORE CARDS ── */
@@ -214,8 +326,8 @@ const CSS = `
   padding: 12px 15px; margin-bottom: 8px; position: relative; overflow: hidden;
   transition: border-color .2s, box-shadow .2s;
 }
-.sc:hover { border-color: var(--border2); }
-.sc.live  { border-color: var(--live-col); box-shadow: 0 0 18px rgba(255,61,87,.14); }
+.sc:hover { border-color: var(--accent); }
+.sc.live  { border-color: var(--live-col); box-shadow: 0 0 18px rgba(231,76,60,.14); }
 .sc.live::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--live-col); }
 .sc.focus { border-color: var(--focus) !important; box-shadow: 0 0 24px var(--focus-glow) !important; background: var(--focus-bg) !important; }
 .sc.focus::before { background: var(--focus) !important; }
@@ -228,7 +340,6 @@ const CSS = `
   animation: lpulse 1.5s ease-in-out infinite;
 }
 @keyframes lpulse { 0%,100%{opacity:1} 50%{opacity:.6} }
-
 .focus-badge {
   position: absolute; top: 0; right: 0;
   background: var(--focus); color: #000;
@@ -236,26 +347,43 @@ const CSS = `
   padding: 3px 10px; border-bottom-left-radius: 8px; letter-spacing: 1.5px;
 }
 .dual-badge { position: absolute; top: 0; right: 0; display: flex; }
-.dual-badge .live-badge, .dual-badge .focus-badge { position: static; border-radius: 0; }
-.dual-badge .live-badge { border-bottom-left-radius: 0; }
-.dual-badge .focus-badge { border-bottom-left-radius: 8px; }
+.dual-badge .live-badge  { position: static; border-radius: 0; }
+.dual-badge .focus-badge { position: static; border-bottom-left-radius: 8px; border-radius: 0 0 0 8px; }
 
 .sc-row { display: flex; align-items: center; padding: 4px 0; }
 .seed { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dim); min-width: 20px; margin-right: 6px; font-weight: 500; }
-.sc-team { font-size: 14px; font-weight: 700; flex: 1; letter-spacing: .3px; color: var(--white); }
+.sc-team { font-size: 15px; font-weight: 700; flex: 1; letter-spacing: .3px; color: var(--white); }
 .sc-rec  { font-size: 10px; color: var(--dim); font-family: 'DM Mono', monospace; margin-left: 6px; font-weight: 400; }
-.sc-score { font-family: 'Bebas Neue', sans-serif; font-size: 29px; min-width: 42px; text-align: right; line-height: 1; }
+.sc-score { font-family: 'Bebas Neue', sans-serif; font-size: 30px; min-width: 44px; text-align: right; line-height: 1; }
 .sc-score.hi   { color: var(--white); }
 .sc-score.lo   { color: var(--dimmer); }
 .sc-score.tied { color: var(--accent); }
 .sc-time { font-family: 'Bebas Neue', sans-serif; font-size: 18px; color: var(--accent); min-width: 80px; text-align: right; line-height: 1; white-space: nowrap; }
 .sc-time.ft { color: var(--focus); }
-.sc-div { border: none; border-top: 1px solid var(--border); margin: 5px 0; }
-.sc-foot { display: flex; justify-content: center; gap: 12px; margin-top: 4px; }
+.sc-div { border: none; border-top: 1px solid var(--border2); margin: 5px 0; }
+.sc-foot { display: flex; justify-content: space-between; align-items: flex-start; margin-top: 6px; gap: 8px; flex-wrap: wrap; }
 .sc-badge { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dim); letter-spacing: 1px; }
 .sc-badge.live { color: var(--live-col); }
-.sc-badge.focus-txt-c { color: var(--focus); }
+.sc-badge.focus-c { color: var(--focus); }
 .sc-net { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dimmer); }
+
+/* BET LABELS on score cards */
+.sc-bet-labels { display: flex; flex-direction: column; gap: 3px; align-items: flex-end; flex-shrink: 0; }
+.sc-bet-label {
+  font-family: 'DM Mono', monospace; font-size: 9px; font-weight: 500;
+  padding: 2px 8px; border-radius: 4px; letter-spacing: .5px;
+  background: rgba(255,215,0,0.12); color: var(--focus);
+  border: 1px solid rgba(255,215,0,0.25);
+  white-space: nowrap;
+}
+.sc-bet-label.won  { background: rgba(46,204,113,0.12);  color: var(--win);  border-color: rgba(46,204,113,0.3); }
+.sc-bet-label.lost { background: rgba(231,76,60,0.12);   color: var(--lose); border-color: rgba(231,76,60,0.3); }
+.sc-bet-label.push { background: rgba(243,156,18,0.12);  color: var(--push); border-color: rgba(243,156,18,0.3); }
+
+.sc-total-line {
+  font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dim);
+  margin-top: 2px; text-align: center;
+}
 
 .no-games { text-align: center; padding: 50px 20px; font-family: 'DM Mono', monospace; font-size: 11px; color: var(--dimmer); letter-spacing: 2px; line-height: 2; }
 
@@ -266,11 +394,14 @@ const CSS = `
   padding: 12px 10px; text-align: center; position: relative; overflow: hidden;
 }
 .s-card::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: var(--blue-light); opacity: .5; }
-.s-lbl { font-family: 'DM Mono', monospace; font-size: 7px; color: var(--dimmer); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 4px; }
+.s-lbl { font-family: 'DM Mono', monospace; font-size: 7px; color: var(--dim); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 4px; }
 .s-val { font-family: 'Bebas Neue', sans-serif; font-size: 32px; line-height: 1; color: var(--white); }
 .s-val.g  { color: var(--win); }
 .s-val.r  { color: var(--lose); }
 .s-val.bl { color: var(--accent); }
+
+/* ── AUTO GRADE INDICATOR on bet card ── */
+.bc-auto { font-family: 'DM Mono', monospace; font-size: 7px; color: var(--accent); letter-spacing: 1px; margin-top: 2px; }
 
 /* ── ROUND GROUPS ── */
 .rnd-hdr { font-family: 'Bebas Neue', sans-serif; font-size: 20px; letter-spacing: 3px; color: var(--accent2); padding: 6px 0 5px; margin: 20px 0 5px; border-bottom: 2px solid var(--blue-mid); display: flex; align-items: center; justify-content: space-between; }
@@ -278,7 +409,7 @@ const CSS = `
 .rnd-pnl.g { color: var(--win); }
 .rnd-pnl.r { color: var(--lose); }
 .rnd-pnl.n { color: var(--dim); }
-.rnd-rec { font-family: 'DM Mono', monospace; font-size: 8px; color: var(--dimmer); letter-spacing: 1px; margin-bottom: 10px; }
+.rnd-rec { font-family: 'DM Mono', monospace; font-size: 8px; color: var(--dim); letter-spacing: 1px; margin-bottom: 10px; }
 
 /* ── BET CARDS ── */
 .bc {
@@ -287,9 +418,9 @@ const CSS = `
   display: flex; align-items: center; gap: 10px;
   transition: border-color .15s, background .15s;
 }
-.bc.won  { border-color: rgba(0,230,118,.45);  background: rgba(0,230,118,.04); }
-.bc.lost { border-color: rgba(255,61,87,.45);  background: rgba(255,61,87,.04); }
-.bc.push { border-color: rgba(255,171,0,.45);  background: rgba(255,171,0,.04); }
+.bc.won  { border-color: rgba(46,204,113,.5);  background: rgba(46,204,113,.05); }
+.bc.lost { border-color: rgba(231,76,60,.5);   background: rgba(231,76,60,.05); }
+.bc.push { border-color: rgba(243,156,18,.5);  background: rgba(243,156,18,.05); }
 .bc-stripe { width: 3px; align-self: stretch; border-radius: 2px; flex-shrink: 0; background: var(--border2); }
 .bc.won  .bc-stripe { background: var(--win); }
 .bc.lost .bc-stripe { background: var(--lose); }
@@ -317,7 +448,7 @@ const CSS = `
 
 /* ── MODAL ── */
 .ov { position: fixed; inset: 0; background: rgba(0,8,30,.93); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 18px; backdrop-filter: blur(5px); }
-.modal { background: var(--bg2); border: 1px solid var(--blue-light); border-radius: 14px; padding: 24px; width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,.6), 0 0 50px rgba(0,48,135,.35); }
+.modal { background: var(--bg2); border: 1px solid var(--blue-light); border-radius: 14px; padding: 24px; width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,.6), 0 0 50px rgba(0,48,135,.3); }
 .m-title { font-family: 'Bebas Neue', sans-serif; font-size: 24px; letter-spacing: 3px; color: var(--white); margin-bottom: 20px; border-bottom: 1px solid var(--border2); padding-bottom: 10px; }
 .fg { margin-bottom: 12px; }
 .fl { display: block; font-family: 'DM Mono', monospace; font-size: 8px; color: var(--dim); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 5px; }
@@ -339,23 +470,27 @@ const CSS = `
 }
 `;
 
-// ─── SCORE CARD ───────────────────────────────────────────────────────────
-function ScoreCard({ event, isFocused }) {
-  const comps   = event.competitions?.[0]?.competitors || [];
-  const home    = comps.find(c => c.homeAway === "home");
-  const away    = comps.find(c => c.homeAway === "away");
-  const state   = event.status?.type?.state;
-  const isLive  = state === "in";
-  const isFinal = state === "post";
-  const isPre   = state === "pre";
-  const statusText = event.status?.type?.shortDetail || "";
-  const network = event.competitions?.[0]?.broadcasts?.[0]?.names?.[0] || "";
-  const gameTime = fmtTime(event.date);
-  const hScore = parseInt(home?.score ?? -1);
-  const aScore = parseInt(away?.score ?? -1);
+// ═══════════════════════════════════════════════════════════════════════════
+// SCORE CARD
+// ═══════════════════════════════════════════════════════════════════════════
+function ScoreCard({ event, matchedBets }) {
+  const isFocused = matchedBets.length > 0;
+  const comps     = event.competitions?.[0]?.competitors || [];
+  const home      = comps.find(c => c.homeAway === "home");
+  const away      = comps.find(c => c.homeAway === "away");
+  const state     = event.status?.type?.state;
+  const isLive    = state === "in";
+  const isFinal   = state === "post";
+  const isPre     = state === "pre";
+  const statusTxt = event.status?.type?.shortDetail || "";
+  const network   = event.competitions?.[0]?.broadcasts?.[0]?.names?.[0] || "";
+  const gameTime  = fmtTime(event.date);
+  const hScore    = parseInt(home?.score ?? -1);
+  const aScore    = parseInt(away?.score ?? -1);
   const showScores = isLive || isFinal;
   const hClass = !showScores ? "" : hScore > aScore ? "hi" : hScore < aScore ? "lo" : "tied";
   const aClass = !showScores ? "" : aScore > hScore ? "hi" : aScore < hScore ? "lo" : "tied";
+  const combined  = showScores ? hScore + aScore : null;
 
   return (
     <div className={`sc ${isLive ? "live" : ""} ${isFocused ? "focus" : ""}`}>
@@ -382,15 +517,32 @@ function ScoreCard({ event, isFocused }) {
         {showScores && <span className={`sc-score ${hClass}`}>{home?.score ?? "—"}</span>}
         {isPre      && <span className="sc-time" />}
       </div>
+
       <div className="sc-foot">
-        <span className={`sc-badge ${isLive ? "live" : ""} ${isFocused && !isLive ? "focus-txt-c" : ""}`}>{statusText}</span>
-        {network && <span className="sc-net">{network}</span>}
+        <div>
+          <span className={`sc-badge ${isLive ? "live" : ""} ${isFocused && !isLive ? "focus-c" : ""}`}>{statusTxt}</span>
+          {network && <span className="sc-net" style={{marginLeft:"8px"}}>{network}</span>}
+          {combined !== null && isFocused && (
+            <div className="sc-total-line">Combined: {combined} pts</div>
+          )}
+        </div>
+        {isFocused && (
+          <div className="sc-bet-labels">
+            {matchedBets.map(b => (
+              <div key={b.id} className={`sc-bet-label ${b.status !== "pending" ? b.status : ""}`}>
+                {betLabel(b)}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-// ─── BET CARD ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// BET CARD
+// ═══════════════════════════════════════════════════════════════════════════
 function BetCard({ bet, onStatus, onDelete }) {
   const win = calcWin(bet.odds, bet.stake);
   const payoutLabel =
@@ -404,6 +556,7 @@ function BetCard({ bet, onStatus, onDelete }) {
       <div className="bc-info">
         <div className="bc-pick">{bet.pick}</div>
         <div className="bc-meta">{bet.betType} · {fmtOdds(bet.odds)} · ${bet.stake} stake</div>
+        {bet.autoGraded && <div className="bc-auto">⚡ auto-graded from final score</div>}
       </div>
       <div className={`bc-payout ${bet.status}`}>{payoutLabel}</div>
       <div className="sbts">
@@ -416,20 +569,23 @@ function BetCard({ bet, onStatus, onDelete }) {
   );
 }
 
-// ─── MAIN APP ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════════════
 const INTERVAL = 10;
 
 export default function App() {
-  const [tab, setTab]             = useState("scores");
-  const [scores, setScores]       = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState(null);
-  const [apiUrl, setApiUrl]       = useState("");
-  const [updated, setUpdated]     = useState(null);
-  const [countdown, setCountdown] = useState(INTERVAL);
-  const [bets, setBets]           = useState(loadBets);
-  const [showAdd, setShowAdd]     = useState(false);
-  const [nb, setNb]               = useState({ round: "Round of 64", pick: "", betType: "Spread", odds: -110, stake: 150 });
+  const [tab, setTab]               = useState("scores");
+  const [scores, setScores]         = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState(null);
+  const [apiUrl, setApiUrl]         = useState("");
+  const [updated, setUpdated]       = useState(null);
+  const [countdown, setCountdown]   = useState(INTERVAL);
+  const [bets, setBets]             = useState(loadBets);
+  const [autoGradedCount, setAutoGradedCount] = useState(0);
+  const [showAdd, setShowAdd]       = useState(false);
+  const [nb, setNb]                 = useState({ round: "Round of 64", pick: "", betType: "Spread", odds: -110, stake: 150 });
 
   useEffect(() => { saveBets(bets); }, [bets]);
 
@@ -441,8 +597,26 @@ export default function App() {
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
-      setScores(data.events || []);
+      const events = data.events || [];
+      setScores(events);
       setUpdated(new Date());
+
+      // ── AUTO-GRADE pending bets from final scores ──
+      setBets(prevBets => {
+        let changed = 0;
+        const updated = prevBets.map(bet => {
+          if (bet.status !== "pending") return bet;
+          for (const event of events) {
+            const matchedBetsForGame = getBetsForGame(event, [bet]);
+            if (matchedBetsForGame.length === 0) continue;
+            const result = gradeBet(bet, event);
+            if (result) { changed++; return { ...bet, status: result, autoGraded: true }; }
+          }
+          return bet;
+        });
+        if (changed > 0) setAutoGradedCount(c => c + changed);
+        return updated;
+      });
     } catch (err) {
       setError(err.message);
     }
@@ -461,7 +635,7 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  const upStatus = (id, status) => setBets(p => p.map(b => b.id===id ? {...b, status} : b));
+  const upStatus = (id, status) => setBets(p => p.map(b => b.id===id ? {...b, status, autoGraded: false} : b));
   const delBet   = (id) => setBets(p => p.filter(b => b.id!==id));
   const addBet   = () => {
     if (!nb.pick.trim()) return;
@@ -485,14 +659,12 @@ export default function App() {
   const upcoming = scores.filter(e => e.status?.type?.state==="pre");
   const final    = scores.filter(e => e.status?.type?.state==="post");
   const focusCount = scores.filter(e => gameMatchesBets(e, bets)).length;
-
-  const sortFocus = arr => [...arr].sort((a,b) => gameMatchesBets(b,bets) - gameMatchesBets(a,bets));
+  const sortFocus  = arr => [...arr].sort((a,b) => gameMatchesBets(b,bets) - gameMatchesBets(a,bets));
 
   return (
     <>
       <style>{CSS}</style>
       <div className="app">
-        {/* HEADER */}
         <header className="hdr">
           <div className="hdr-glow" />
           <div className="hdr-dots"><span>• • • • •</span><span>• • • • •</span></div>
@@ -502,7 +674,6 @@ export default function App() {
           <div className="title-sub">🏀 NCAA Tournament · Betting Tracker 🏀</div>
         </header>
 
-        {/* TABS */}
         <div className="tabs">
           <button className={`tab ${tab==="scores"?"active":""}`} onClick={()=>setTab("scores")}>📺 Live Scores</button>
           <button className={`tab ${tab==="bets"?"active":""}`}   onClick={()=>setTab("bets")}>🎲 Bet Tracker</button>
@@ -525,9 +696,12 @@ export default function App() {
               </div>
 
               {error && (
-                <div className="api-warn">
-                  ⚠ API Error: {error}<br />
-                  ESPN's free API may be rate-limited or temporarily unavailable. Will retry in {countdown}s.
+                <div className="api-warn">⚠ API Error: {error} — retrying in {countdown}s</div>
+              )}
+
+              {autoGradedCount > 0 && (
+                <div className="auto-banner">
+                  ⚡ {autoGradedCount} bet{autoGradedCount!==1?"s":""} auto-graded from final scores — check Bet Tracker
                 </div>
               )}
 
@@ -539,23 +713,27 @@ export default function App() {
               )}
 
               {loading && <div className="no-games">LOADING SCORES...</div>}
-
               {!loading && !error && scores.length===0 && (
                 <div className="no-games">
                   NO NCAA MEN'S BASKETBALL GAMES FOUND FOR TODAY<br/>
-                  <span style={{fontSize:"9px",opacity:.5}}>The ESPN API returned 0 events for today's date.<br/>Games may not be scheduled today or the tournament may be between rounds.</span>
+                  <span style={{fontSize:"9px",opacity:.5}}>Games may not be scheduled today or the tournament is between rounds.</span>
                 </div>
               )}
 
-              {live.length>0     && <><div className="sec-lbl">🔴 IN PROGRESS ({live.length})</div>{sortFocus(live).map(e    =><ScoreCard key={e.id} event={e} isFocused={gameMatchesBets(e,bets)}/>)}</>}
-              {upcoming.length>0 && <><div className="sec-lbl">⏰ TODAY'S SCHEDULE ({upcoming.length})</div>{sortFocus(upcoming).map(e=><ScoreCard key={e.id} event={e} isFocused={gameMatchesBets(e,bets)}/>)}</>}
-              {final.length>0    && <><div className="sec-lbl">✅ FINAL ({final.length})</div>{sortFocus(final).map(e        =><ScoreCard key={e.id} event={e} isFocused={gameMatchesBets(e,bets)}/>)}</>}
+              {live.length>0     && <><div className="sec-lbl">🔴 IN PROGRESS ({live.length})</div>{sortFocus(live).map(e    =><ScoreCard key={e.id} event={e} matchedBets={getBetsForGame(e,bets)}/>)}</>}
+              {upcoming.length>0 && <><div className="sec-lbl">⏰ TODAY'S SCHEDULE ({upcoming.length})</div>{sortFocus(upcoming).map(e=><ScoreCard key={e.id} event={e} matchedBets={getBetsForGame(e,bets)}/>)}</>}
+              {final.length>0    && <><div className="sec-lbl">✅ FINAL ({final.length})</div>{sortFocus(final).map(e        =><ScoreCard key={e.id} event={e} matchedBets={getBetsForGame(e,bets)}/>)}</>}
             </>
           )}
 
           {/* ── BETS TAB ── */}
           {tab==="bets" && (
             <>
+              {autoGradedCount > 0 && (
+                <div className="auto-banner">
+                  ⚡ {autoGradedCount} bet{autoGradedCount!==1?"s":""} auto-graded from final scores
+                </div>
+              )}
               <div className="stats">
                 <div className="s-card">
                   <div className="s-lbl">Record</div>
@@ -604,7 +782,6 @@ export default function App() {
           )}
         </div>
 
-        {/* ADD BET MODAL */}
         {showAdd && (
           <div className="ov" onClick={e=>e.target===e.currentTarget&&setShowAdd(false)}>
             <div className="modal">
