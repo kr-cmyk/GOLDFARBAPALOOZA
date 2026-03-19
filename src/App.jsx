@@ -30,7 +30,7 @@ function getScoreboardUrl() {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
-  return `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${y}${m}${d}&limit=100`;
+  return `/api/scoreboard?dates=${y}${m}${d}`;
 }
 
 function calcWin(odds, stake) {
