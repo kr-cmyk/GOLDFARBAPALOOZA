@@ -49,27 +49,35 @@ function fmtTime(isoStr) {
   catch { return ""; }
 }
 
-// Match game teams against bet pick text
-function getPickTeams(pick) {
-  return pick
-    .replace(/[+-][\d.]+/g, "")
-    .replace(/\b(ML|moneyline|over|under|spread|total)\b/gi, "")
-    .replace(/[/]/g, " ")
-    .split(/\s+/)
-    .map(w => w.trim().toLowerCase())
-    .filter(w => w.length > 2);
+// Extract full team name phrases from a pick string.
+// Splits on "/" for totals, strips spread/ML/total descriptors.
+// Returns full phrases e.g. ["north dakota state"] not ["north","dakota","state"]
+function extractTeamPhrases(pick) {
+  return pick.split("/").map(p =>
+    p
+      .replace(/[+-][\d.]+/g, "")
+      .replace(/\b(ML|moneyline|over|under|spread|total)\b/gi, "")
+      .replace(/\b\d+(\.\d+)?\b/g, "")
+      .trim()
+      .toLowerCase()
+  ).filter(p => p.replace(/\s/g, "").length >= 3);
 }
 
 function gameMatchesBets(event, bets) {
   const comps = event.competitions?.[0]?.competitors || [];
-  const names = comps.flatMap(c => [
-    c.team?.name, c.team?.shortDisplayName, c.team?.abbreviation, c.team?.displayName, c.team?.nickname
-  ]).filter(Boolean).map(n => n.toLowerCase());
+  const espnNames = comps.flatMap(c => [
+    c.team?.name,
+    c.team?.shortDisplayName,
+    c.team?.abbreviation,
+    c.team?.displayName,
+    c.team?.nickname,
+  ]).filter(Boolean).map(n => n.toLowerCase().trim());
 
   return bets.some(bet => {
-    const keywords = getPickTeams(bet.pick);
-    return keywords.some(kw =>
-      names.some(name => name.includes(kw) || name.split(" ").some(w => w === kw))
+    const phrases = extractTeamPhrases(bet.pick);
+    return phrases.some(phrase =>
+      phrase.length >= 4 &&
+      espnNames.some(name => name.includes(phrase) || phrase.includes(name))
     );
   });
 }
@@ -80,26 +88,27 @@ const CSS = `
 
 :root {
   --blue:        #003087;
-  --blue-dark:   #001845;
-  --blue-mid:    #00256b;
-  --blue-light:  #1a4fa8;
-  --accent:      #5b8def;
-  --accent2:     #7aaeff;
-  --bg:          #000d22;
-  --bg2:         #00112e;
-  --bg3:         #001840;
-  --border:      #001f5a;
-  --border2:     #002a75;
-  --white:       #ffffff;
-  --dim:         #3a5a90;
-  --dimmer:      #1e3460;
-  --win:         #00e676;
-  --lose:        #ff3d57;
-  --push:        #ffab00;
-  --live-col:    #ff3d57;
+  --blue-dark:   #00204a;
+  --blue-mid:    #003580;
+  --blue-light:  #2060c0;
+  --accent:      #7ab3ff;
+  --accent2:     #99c8ff;
+  --bg:          #06101e;
+  --bg2:         #0d1f3c;
+  --bg3:         #0a1830;
+  --border:      #1a3260;
+  --border2:     #2a4a88;
+  --white:       #f0f4ff;
+  --text:        #d8e4ff;
+  --dim:         #7a9acc;
+  --dimmer:      #4a6a99;
+  --win:         #2ecc71;
+  --lose:        #e74c3c;
+  --push:        #f39c12;
+  --live-col:    #e74c3c;
   --focus:       #ffd700;
-  --focus-glow:  rgba(255,215,0,0.18);
-  --focus-bg:    rgba(255,215,0,0.05);
+  --focus-glow:  rgba(255,215,0,0.2);
+  --focus-bg:    rgba(255,215,0,0.07);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -107,7 +116,7 @@ const CSS = `
 .app {
   min-height: 100vh;
   background: var(--bg);
-  color: var(--white);
+  color: var(--text);
   font-family: 'Barlow Condensed', sans-serif;
   font-weight: 400;
 }
@@ -165,7 +174,7 @@ const CSS = `
   gap: 8px;
 }
 .rbar-left { display: flex; flex-direction: column; gap: 2px; }
-.rbar-info { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dimmer); letter-spacing: 1px; }
+.rbar-info { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dim); letter-spacing: 1px; }
 .rbar-url  { font-family: 'DM Mono', monospace; font-size: 8px; color: var(--dimmer); letter-spacing: .5px; opacity: .6; word-break: break-all; }
 .rbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .rbar-cd   { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--accent); letter-spacing: 1px; white-space: nowrap; }
@@ -201,7 +210,7 @@ const CSS = `
 
 /* ── SCORE CARDS ── */
 .sc {
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  background: #0d1f3c; border: 1px solid var(--border2); border-radius: 10px;
   padding: 12px 15px; margin-bottom: 8px; position: relative; overflow: hidden;
   transition: border-color .2s, box-shadow .2s;
 }
@@ -232,9 +241,9 @@ const CSS = `
 .dual-badge .focus-badge { border-bottom-left-radius: 8px; }
 
 .sc-row { display: flex; align-items: center; padding: 4px 0; }
-.seed { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dimmer); min-width: 20px; margin-right: 6px; }
-.sc-team { font-size: 14px; font-weight: 700; flex: 1; letter-spacing: .3px; }
-.sc-rec  { font-size: 10px; color: var(--dimmer); font-family: 'DM Mono', monospace; margin-left: 6px; font-weight: 400; }
+.seed { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dim); min-width: 20px; margin-right: 6px; font-weight: 500; }
+.sc-team { font-size: 14px; font-weight: 700; flex: 1; letter-spacing: .3px; color: var(--white); }
+.sc-rec  { font-size: 10px; color: var(--dim); font-family: 'DM Mono', monospace; margin-left: 6px; font-weight: 400; }
 .sc-score { font-family: 'Bebas Neue', sans-serif; font-size: 29px; min-width: 42px; text-align: right; line-height: 1; }
 .sc-score.hi   { color: var(--white); }
 .sc-score.lo   { color: var(--dimmer); }
@@ -243,7 +252,7 @@ const CSS = `
 .sc-time.ft { color: var(--focus); }
 .sc-div { border: none; border-top: 1px solid var(--border); margin: 5px 0; }
 .sc-foot { display: flex; justify-content: center; gap: 12px; margin-top: 4px; }
-.sc-badge { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dimmer); letter-spacing: 1px; }
+.sc-badge { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dim); letter-spacing: 1px; }
 .sc-badge.live { color: var(--live-col); }
 .sc-badge.focus-txt-c { color: var(--focus); }
 .sc-net { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dimmer); }
@@ -253,7 +262,7 @@ const CSS = `
 /* ── STATS ── */
 .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; margin-bottom: 20px; }
 .s-card {
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 9px;
+  background: #0d1f3c; border: 1px solid var(--border2); border-radius: 9px;
   padding: 12px 10px; text-align: center; position: relative; overflow: hidden;
 }
 .s-card::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: var(--blue-light); opacity: .5; }
@@ -273,7 +282,7 @@ const CSS = `
 
 /* ── BET CARDS ── */
 .bc {
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 9px;
+  background: #0d1f3c; border: 1px solid var(--border2); border-radius: 9px;
   padding: 11px 13px; margin-bottom: 7px;
   display: flex; align-items: center; gap: 10px;
   transition: border-color .15s, background .15s;
@@ -286,8 +295,8 @@ const CSS = `
 .bc.lost .bc-stripe { background: var(--lose); }
 .bc.push .bc-stripe { background: var(--push); }
 .bc-info { flex: 1; min-width: 0; }
-.bc-pick { font-weight: 700; font-size: 14px; letter-spacing: .3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bc-meta { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--dimmer); margin-top: 2px; }
+.bc-pick { font-weight: 700; font-size: 14px; letter-spacing: .3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--white); }
+.bc-meta { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--dim); margin-top: 2px; }
 .bc-payout { font-family: 'DM Mono', monospace; font-size: 11px; white-space: nowrap; min-width: 82px; text-align: right; font-weight: 500; }
 .bc-payout.won     { color: var(--win); }
 .bc-payout.lost    { color: var(--lose); }
